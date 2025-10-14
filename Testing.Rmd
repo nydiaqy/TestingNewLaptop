@@ -1,11 +1,349 @@
 ---
-title: "Testing"
+title: "Testing CRQA"
 output: html_document
 date: "2025-09-05"
 ---
-
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE, results = 'hide', message = FALSE, warning = FALSE)
+```
+Clean environment and load package
+
+```{r}
+rm(list=ls())
+library(dplyr)
+library(crqa)
+library(ggplot2)
+library(officer)
+
+
 ```
 
-## AYO you know what I am talking abt>
+load script in prep for splitting into two sub-sripts 
+
+```{r}
+doc <- read_docx("Example debate script.docx")
+debate <- docx_summary(doc)$text # vector of paragraphs 
+
+debate <- trimws(debate)
+debate <- debate[nzchar(debate)]          # drop empty lines
+debate <- sub("^-\\s*", "", debate) # remove leading "-"s and spaces
+
+
+idx <- seq_along(debate)
+person1 <- debate[idx %% 2 == 1]   # 1,3,5,...
+person2 <- debate[idx %% 2 == 0] 
+#Start at 1, go up to the total number of lines, step by 2.
+
+
+people_one <- paste(person1, collapse = "\n")
+people_two <- paste(person2, collapse = "\n")
+#combine into 2 scripts, change line by"\n
+
+```
+
+1） Now I have two separate script. I need to change them into numeric form and look for the general recurrence regardless of turns or word types. 
+```{r}
+tok <- function(x) {
+  x <- tolower(paste(x, collapse = " "))                 # join lines, lower
+  x <- gsub("[^\\p{L}\\p{N}\\s']+", " ", x, perl = TRUE) # keep letters/numbers/' ; drop punct
+  w <- unlist(strsplit(x, "\\s+"))
+  w[nzchar(w)]
+}
+
+w1 <- tok(person1)
+w2 <- tok(person2)
+
+# 2) build a shared vocabulary and mapping
+vocab <- sort(unique(c(w1, w2)))
+idmap <- setNames(seq_along(vocab), vocab)
+
+# 3) encode to integers
+s1 <- unname(idmap[w1])   # numeric series for speaker 1
+s2 <- unname(idmap[w2])   # numeric series for speaker 2
+
+# (optional) inspect / save the mapping for interpretability
+dict <- data.frame(token = vocab, id = seq_along(vocab))
+head(dict)
+length(s1); length(s2)
+```
+Inspect 2 scripts
+```{r}
+
+#Inpect S1 self recurrence 
+s1_df <- tibble(value = s1) %>%
+  rowid_to_column("seq_loc")
+
+plot_s1 = ggplot(data = s1_df,
+                         aes(x = seq_loc,
+                             y = value)) +
+  geom_path(color="purple") +
+  geom_point(color="purple") +
+  theme(legend.position="none", axis.text.x = element_blank(), axis.text.y = element_blank()) +
+  xlab("Word") + ylab("Numbe of word") +
+  ggtitle("Word sequences in debator 1")
+
+plot_s1
+
+#inspect S2 self recurrence 
+s2_df <- tibble(value = s2) %>%
+  rowid_to_column("seq_loc")
+
+plot_s2 = ggplot(data = s2_df,
+                         aes(x = seq_loc,
+                             y = value)) +
+  geom_path(color="pink") +
+  geom_point(color="pink") +
+  theme(legend.position="none", axis.text.x = element_blank(), axis.text.y = element_blank()) +
+  xlab("Word") + ylab("Numbe of word") +
+  ggtitle("Word sequences in debator 2")
+
+plot_s2
+
+```
+CRQA regardless of turns and words
+
+```{r}
+#set parameters
+#Theiler window parameter keeping the diagonal 
+cross_theiler_window = 0
+
+# set radius to be very small for categorical matches
+cross_categorical_radius = .0001
+
+#truncate S2 to length of S1
+truncated_S2 = s2_df %>%
+  slice(1:dim(s1_df)[1])
+
+#run crqa
+cross_recurrence_analysis = crqa(ts1=s1_df$value,
+                                 ts2=truncated_S2$value,
+                                 delay=0,
+                                 embed=1,
+                                 rescale=0,
+                                 radius=cross_categorical_radius,
+                                 normalize=0,
+                                 mindiagline=2,
+                                 minvertline=2,
+                                 tw=cross_theiler_window)
+
+#C-RP
+plot_rp(cross_recurrence_analysis$RP, 
+        title = "Cross-Recurrence Plot of 2 debaters",
+        pcolour = "blue",
+        xlabel = "word for debater 1",
+        ylabel = "word for debater 2",
+        geom = "point")
+
+#inspect recurrence metrics 
+cross_recurrence_analysis$RR # rate of recurrence
+cross_recurrence_analysis$DET # % determinism (The percentage of recurrence points that form diagonal lines in the plot.) meaning both speakers used the same phrase (words >= 2)
+cross_recurrence_analysis$NRLINE # total number of diagonal lines on the plot
+cross_recurrence_analysis$maxL # maximum line length on plot
+cross_recurrence_analysis$L # average line length on plot
+cross_recurrence_analysis$ENTR # entropy - higher means more vaiebility in interaction length 
+cross_recurrence_analysis$rENTR # normalized entropy
+cross_recurrence_analysis$LAM # laminarity
+cross_recurrence_analysis$TT # trapping time （no laminarity → no trapping time.）
+
+x <-cross_recurrence_analysis
+metrics <- tibble(
+  metric = c("RR","DET","NRLINE","maxL","L","ENTR","rENTR","LAM","TT"),
+  value  = c(x$RR, x$DET, x$NRLINE, x$maxL, x$L, x$ENTR, x$rENTR, x$LAM, x$TT)
+)
+
+metrics
+
+```
+
+Now I am interested in the recurrence of certain words 
+
+```{r}
+# Combine both speakers’ word streams
+all_words <- c(w1, w2)
+
+# Get the 20 most frequent words
+top20 <- sort(table(all_words), decreasing = TRUE)[1:20]
+
+# Print nicely
+top20
+
+#create another list of targeted words
+target_words <- c("classification", "dsm", "eating", "disorders",
+                  "diagnostic", "systems", "cultural", "treatment")
+
+codes <- 1:8
+names(codes) <- target_words
+
+# Create a function to recode any word vector (e.g. w1 or w2)
+recode_words <- function(words, codes) {
+  # assign codes for matching words; others get 0
+  out <- ifelse(words %in% names(codes), codes[words], 0)
+  # unname() makes it a clean numeric vector
+  unname(out)
+}
+
+s1_recode <- recode_words(w1, codes)
+s2_recode <- recode_words(w2, codes)
+
+head(cbind(w1, s1_recode), 15)
+
+```
+re-run crqa, only looking at the recurrence of words (1-8). ignore all 0s
+```{r}
+#truncate S2 to length of S1
+truncated_S2recode <- s2_recode[1:length(s1_recode)]
+
+
+#compute all 0s into a dif number
+
+nzcode <- function(x, offset = 0L) {
+  i <- which(x == 0)
+  x[i] <- -(seq_along(i) + offset)
+  x
+}
+
+n0_s1 <- sum(s1_recode == 0)
+
+s1_no0 <- nzcode(s1_recode, offset = 0L)
+s2_no0 <- nzcode(truncated_S2recode,  offset = n0_s1)
+
+
+
+head(s1_no0)
+head(s2_no0)
+
+
+# Run CRQA on the computed datasets 
+cross_recurrence_recode <- crqa(
+  ts1 = s1_no0,
+  ts2 = s2_no0,
+  datatype    = "categorical",
+  delay       = 1,
+  embed       = 1,
+  rescale     = 0,
+  radius      = 0.001,     # categorical: “exact match”
+  mindiagline = 2,         # lmin = 2 (phrases of >=2)
+  minvertline = 2,
+  tw          = 0,
+  whiteline   = FALSE,
+  recpt       = FALSE,
+  side        = "both",
+  method      = "crqa",
+  metric      = "euclidean"
+)
+
+metrics <- tibble(
+  metric = c("RR","DET","NRLINE","maxL","L","ENTR","rENTR","LAM","TT"),
+  value  = c(cross_recurrence_recode$RR, cross_recurrence_recode$DET, cross_recurrence_recode$NRLINE, cross_recurrence_recode$maxL, cross_recurrence_recode$L, cross_recurrence_recode$ENTR, cross_recurrence_recode$rENTR, cross_recurrence_recode$LAM, cross_recurrence_recode$TT)
+)
+metrics
+p<- plot_rp(cross_recurrence_recode$RP,
+        xlabel = "Speaker 1 (time, filtered to 1–8)",
+        ylabel = "Speaker 2 (time, filtered to 1–8)")
+p
+
+```
+Now I have a beautiful graph of how many times, debater 1 and debater 2 both used any words from this list:
+"classification", "dsm", "eating", "disorders",
+                  "diagnostic", "systems", "cultural", "treatment"
+This is on word-level, which means, comdensing each one's script regardless of turns, treat them as a whole series of words. This did not mean anything! So, I am going to look at something different. 
+
+I am intersted in, with in each turn, did they use any of the word from the list or not. if yes, return 1, if not, return 0 
+```{r}
+
+#go back to the two scripts of person1 and person2
+
+target <- c("disorder","eating")
+
+# 2. Build a regex pattern (word boundaries, case-insensitive)
+pattern <- paste0("\\b(", paste(target, collapse = "|"), ")\\b") #\\b ensures full-word matches only (so "systems" matches, but not "ecosystems") paste(targets, collapse = "|") -> classification|dsm|eating|disorders|diagnostic|systems|cultural|treatment"
+
+#check each turn for any target word
+s1_turn <- as.integer(grepl(pattern, tolower(person1))) #tolower makes everything lowercase so case differences don’t matter  grepl searches each turn for any match from your list
+s2_turn <- as.integer(grepl(pattern, tolower(person2))) #as.integer converts TRUE/FALSE into 1/0
+
+#combine into data frame for clarity 
+s1_df <- data.frame(turn = seq_along(s1_turn), contains_keyword = s1_turn, text = person1)
+s2_df <- data.frame(turn = seq_along(s2_turn), contains_keyword = s2_turn, text = person2)
+
+#sanity check
+head(s1_df, 5)
+head(s2_df, 5)
+
+```
+
+here the words are quite high frequency in each turn (frequence>2), simplying converting into 1 or 0 may lose details. however, with sparse emotional words, should be alright as most turns might only contain max 1 word. can be checked in advance on the frequency of words within each turn. 
+
+Now I have two datasets. I want to compute all 0s and make sure recurrence of 0 are not counted. 
+
+```{r}
+#compute all 0s into a dif number
+
+nzcode <- function(x, offset = 0L) {
+  i <- which(x == 0)
+  x[i] <- -(seq_along(i) + offset)
+  x
+}
+
+n0_s1_T<- sum(s1_df$contains_keyword == 0)
+n0_s1_T
+
+s1_no0_T <- nzcode(s1_df$contains_keyword, offset = 0L)
+s2_no0_T <- nzcode(s2_df$contains_keyword,  offset = n0_s1_T)
+
+
+
+head(s1_no0_T)
+head(s2_no0_T)
+
+length(s1_no0_T)
+length(s2_no0_T)
+
+```
+beautiful! now lets do crqa. 
+```{r}
+truncated_s2_no0_T <- s2_no0_T[1:length(s1_no0_T)]
+
+
+crqa_ED = crqa(ts1=s1_no0_T,
+                                 ts2=truncated_s2_no0_T,
+                                 delay=0,
+                                 embed=1,
+                                 rescale=0,
+                                 radius=cross_categorical_radius,
+                                 normalize=0,
+                                 mindiagline=2,
+                                 minvertline=2,
+                                 tw=cross_theiler_window)
+
+#C-RP
+p1<- plot_rp(crqa_ED$RP, 
+        title = "Cross-Recurrence Plot of 2 debaters mentioning eating disorder",
+        pcolour = "blue",
+        xlabel = "debater 1 mentions eating disorder",
+        ylabel = "debater 1 mentions eating disorder",
+        geom = "point")
+p1
+
+#inspect recurrence metrics 
+crqa_ED$RR # rate of recurrence
+crqa_ED$DET # % determinism (The percentage of recurrence points that form diagonal lines in the plot.) meaning both speakers used the same phrase (words >= 2)
+crqa_ED$NRLINE # total number of diagonal lines on the plot
+crqa_ED$maxL # maximum line length on plot
+crqa_ED$L # average line length on plot
+crqa_ED$ENTR # entropy - higher means more vaiebility in interaction length 
+crqa_ED$rENTR # normalized entropy
+crqa_ED$LAM # laminarity
+crqa_ED$TT # trapping time （no laminarity → no trapping time.）
+
+x <-crqa_ED
+metrics <- tibble(
+  metric = c("RR","DET","NRLINE","maxL","L","ENTR","rENTR","LAM","TT"),
+  value  = c(x$RR, x$DET, x$NRLINE, x$maxL, x$L, x$ENTR, x$rENTR, x$LAM, x$TT)
+)
+
+metrics
+
+```
+1. sparse and did not inform a meaningful recurrence pattern 
+2. might need to add width/ distance
